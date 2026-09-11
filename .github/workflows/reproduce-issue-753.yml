@@ -1,0 +1,76 @@
+name: Reproduce x265 issue #753 (aarch64 SVE2)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  reproduce:
+    # GitHub-hosted arm64 runner (public repos). If unavailable on your
+    # plan, swap for a self-hosted aarch64 runner label, e.g. [self-hosted, ARM64].
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout fix branch
+        uses: actions/checkout@v4
+        with:
+          repository: Akilan-Sivakumar/x265_issue_753
+          ref: master
+          path: x265
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ gcc git libasan8 lcov wget
+
+      - name: Configure (cmake)
+        working-directory: x265/build/linux
+        run: |
+          cmake -S ../../source \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DHAVE_SVE2=on \
+            -DHIGH_BIT_DEPTH=off \
+            -DMAIN12=off \
+            -DENABLE_TESTS=on \
+            -DCMAKE_C_COMPILER="gcc" \
+            -DCMAKE_CXX_COMPILER="g++" \
+            -DCMAKE_C_FLAGS="-fprofile-arcs -ftest-coverage" \
+            -DCMAKE_CXX_FLAGS="-fprofile-arcs -ftest-coverage" \
+            -DENABLE_SHARED=off \
+            -DENABLE_LIBNUMA=off
+
+      - name: Build
+        working-directory: x265/build/linux
+        run: make -j"$(nproc)"
+
+      - name: Download reproduction video
+        run: |
+          wget -O ParkScene_1920x1080_24.yuv \
+            "https://github.com/Akilan-Sivakumar/x265_issue_753/releases/download/4.2/ParkScene_1920x1080_24.yuv"
+
+      - name: Run x265 to reproduce
+        working-directory: x265/build/linux
+        env:
+          # Only takes effect if the build actually links in ASan/LSan.
+          # See note below if the sanitizer output doesn't show up.
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=0:log_path=asan_report
+          LSAN_OPTIONS: log_path=lsan_report
+        run: |
+          ./x265 \
+            --input "${GITHUB_WORKSPACE}/ParkScene_1920x1080_24.yuv" \
+            --input-res 1920x1080 \
+            --fps 24 \
+            --no-info \
+            -o out1.h265 \
+            2>&1 | tee run_output.log
+
+      - name: Upload build & run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-753-repro-${{ github.run_id }}
+          path: |
+            x265/build/linux/run_output.log
+            x265/build/linux/asan_report.*
+            x265/build/linux/lsan_report.*
+            x265/build/linux/out1.h265
+          if-no-files-found: ignore
